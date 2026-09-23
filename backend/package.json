@@ -9,6 +9,7 @@
     "build": "node \"node_modules/typescript/bin/tsc\"",
     "start": "node dist/main.js",
     "db:push": "node \"node_modules/prisma/build/index.js\" db push",
+    "db:seed": "node \"node_modules/tsx/dist/cli.mjs\" prisma/seed.ts",
     "prisma:generate": "node \"node_modules/prisma/build/index.js\" generate",
     "studio": "node \"node_modules/prisma/build/index.js\" studio"
   },
@@ -16,15 +17,22 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "7.10.0",
     "@prisma/config": "7.10.0",
+    "bcryptjs": "^3.0.3",
     "dotenv": "^17.2.4",
     "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.3",
+    "pg": "^8.23.0",
     "prisma": "7.10.0"
   },
   "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
     "@types/express": "^5.0.0",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.13.10",
+    "@types/pg": "^8.23.1",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2"
   }
