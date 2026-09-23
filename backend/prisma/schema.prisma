@@ -1,0 +1,61 @@
+// ============================================================
+// Prisma Schema — Manajemen Event & Tiket Digital
+// Branch: feat/auth
+// ============================================================
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+enum Role {
+  ATTENDEE
+  ORGANIZER
+  ADMIN
+}
+
+// ============================================================
+// USER
+// ============================================================
+model User {
+  id            String         @id @default(uuid()) @db.Uuid
+  name          String         @db.VarChar(100)
+  email         String         @unique @db.VarChar(255)
+  passwordHash  String         @map("password_hash") @db.VarChar(255)
+  role          Role           @default(ATTENDEE)
+  isVerified    Boolean        @default(false) @map("is_verified")
+  isActive      Boolean        @default(true) @map("is_active")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+
+  // Relations
+  refreshTokens RefreshToken[]
+
+  @@map("users")
+}
+
+// ============================================================
+// REFRESH TOKEN
+// (Disertakan agar auth JWT bisa di-revoke / logout)
+// ============================================================
+model RefreshToken {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  token     String   @unique @db.VarChar(512)
+  expiresAt DateTime @map("expires_at")
+  isRevoked Boolean  @default(false) @map("is_revoked")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Relations
+  user      User     @relation(fields:[userId], references:[id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+  @@map("refresh_tokens")
+}

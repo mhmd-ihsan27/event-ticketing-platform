@@ -1,19 +1,23 @@
 {
   "name": "manajemen-event-tiket-digital",
+  "type": "module",
   "version": "1.0.0",
   "description": "Backend API for Event & Digital Ticket Management System",
   "main": "dist/main.js",
   "scripts": {
     "dev": "node \"node_modules/tsx/dist/cli.mjs\" watch src/main.ts",
     "build": "node \"node_modules/typescript/bin/tsc\"",
-    "start": "node dist/main.js"
+    "start": "node dist/main.js",
+    "contract:emit": "prisma contract emit"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@prisma/client": "6.19.3",
     "dotenv": "^17.2.4",
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "prisma": "6.19.3"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
