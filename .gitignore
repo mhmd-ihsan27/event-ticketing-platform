@@ -7,3 +7,5 @@ backend/.env
 *.log
 coverage/
 .DS_Store
+scratch/
+backend/scratch/

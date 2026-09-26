@@ -1,79 +1,185 @@
-import { Role } from '@prisma/client';
-import { prisma } from '../../infrastructure/database/prisma.client.js';
 import { hashPassword, comparePassword } from '../../shared/utils/password.util.js';
 import { generateAccessToken, generateRefreshToken, verifyRefreshToken } from '../../shared/utils/jwt.util.js';
+import { AppError } from '../../shared/errors/app-error.js';
+import { AuthRepository } from './auth.repository.js';
+import { emailService, EmailService } from '../../infrastructure/services/email.service.js';
+import {
+  RegisterDTO,
+  LoginDTO,
+  RegisterResultDTO,
+  PendingRegisterResultDTO,
+  LoginResultDTO,
+  RefreshResultDTO,
+} from './auth.dto.js';
 
+/**
+ * AuthService — Business Logic Layer for the Auth module.
+ *
+ * Responsibility:
+ *   - Orchestrate auth operations (register, login, refresh, logout, email verification)
+ *   - Apply business rules (password hashing, token generation, validation)
+ *   - Throw structured AppError — never raw Error strings
+ *
+ * Consumed by: AuthController
+ * Depends on:  AuthRepository (data access)
+ */
 export class AuthService {
-  /**
-   * Register new user (Default role: ATTENDEE)
-   */
-  async register(data: { name: string; email: string; password: string }) {
-    const existingUser = await prisma.user.findUnique({
-      where: { email: data.email },
-    });
+  constructor(
+    private readonly authRepository: AuthRepository,
+    private readonly mailerService: EmailService = emailService,
+  ) {}
 
+  /**
+   * Helper function to generate 6-digit numeric OTP code.
+   */
+  private generateOtpCode(): string {
+    return Math.floor(100000 + Math.random() * 900000).toString();
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Register (Step 1 — Store in Pending Registration, send OTP)
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Initiate registration by storing temporary credential in pending_registrations
+   * and sending 6-digit OTP. User record is NOT inserted into main 'users' table until OTP is verified.
+   */
+  async register(data: RegisterDTO): Promise<PendingRegisterResultDTO> {
+    // [Rule] Check if email is already registered in main users table
+    const existingUser = await this.authRepository.findByEmail(data.email);
     if (existingUser) {
-      throw new Error('EMAIL_EXISTS');
+      throw new AppError('Email sudah terdaftar di sistem.', 409, 'EMAIL_EXISTS');
     }
 
+    // Hash password
     const passwordHash = await hashPassword(data.password);
+    const otp = this.generateOtpCode();
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes TTL
 
-    const user = await prisma.user.create({
-      data: {
-        name: data.name,
-        email: data.email,
-        passwordHash,
-        role: Role.ATTENDEE, // Default register = ATTENDEE (user reguler)
-      },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        isVerified: true,
-        createdAt: true,
-      },
+    // Save to pending_registrations table (Upsert if re-registering before verifying)
+    await this.authRepository.savePendingRegistration({
+      name: data.name,
+      email: data.email,
+      passwordHash,
+      code: otp,
+      expiresAt,
     });
 
-    return user;
+    // Send 6-digit OTP code to email
+    await this.mailerService.sendVerificationOtp(data.email, data.name, otp);
+
+    return {
+      message: 'Registrasi diawali. Silakan cek email Anda untuk memasukkan 6-digit kode OTP verifikasi.',
+      email: data.email,
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Email Verification (Step 2 — Verify OTP & create User record)
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Verify OTP code and insert user record into main 'users' table upon success.
+   */
+  async verifyEmail(email: string, code: string): Promise<RegisterResultDTO> {
+    // Check if email already verified/registered in main users table
+    const existingUser = await this.authRepository.findByEmail(email);
+    if (existingUser) {
+      throw new AppError('Alamat email ini telah terverifikasi dan terdaftar di sistem.', 400, 'ALREADY_VERIFIED');
+    }
+
+    // Verify OTP in pending_registrations
+    const pendingRegistration = await this.authRepository.findValidPendingRegistration(email, code);
+    if (!pendingRegistration) {
+      throw new AppError('Kode OTP tidak valid atau telah kadaluwarsa.', 400, 'INVALID_OTP');
+    }
+
+    // Create user in main 'users' table as verified
+    const newVerifiedUser = await this.authRepository.createVerifiedUser({
+      name: pendingRegistration.name,
+      email: pendingRegistration.email,
+      passwordHash: pendingRegistration.passwordHash,
+    });
+
+    // Remove pending registration record
+    await this.authRepository.deletePendingRegistration(email);
+
+    return newVerifiedUser;
   }
 
   /**
-   * Login user & emit tokens
+   * Resend 6-digit verification OTP code for pending registration.
    */
-  async login(data: { email: string; password: string }) {
-    const user = await prisma.user.findUnique({
-      where: { email: data.email },
+  async resendVerificationOtp(email: string): Promise<{ message: string }> {
+    // Check if email already verified
+    const existingUser = await this.authRepository.findByEmail(email);
+    if (existingUser) {
+      throw new AppError('Alamat email ini sudah terverifikasi.', 400, 'ALREADY_VERIFIED');
+    }
+
+    const pendingRegistration = await this.authRepository.findPendingByEmail(email);
+    if (!pendingRegistration) {
+      throw new AppError('Data pendaftaran tidak ditemukan. Silakan lakukan registrasi ulang.', 404, 'PENDING_REGISTRATION_NOT_FOUND');
+    }
+
+    const otp = this.generateOtpCode();
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes TTL
+
+    await this.authRepository.savePendingRegistration({
+      name: pendingRegistration.name,
+      email: pendingRegistration.email,
+      passwordHash: pendingRegistration.passwordHash,
+      code: otp,
+      expiresAt,
     });
 
+    await this.mailerService.sendVerificationOtp(email, pendingRegistration.name, otp);
+
+    return {
+      message: 'Kode OTP verifikasi baru telah dikirimkan ke email Anda.',
+    };
+  }
+
+
+  // ─────────────────────────────────────────────────────────────
+  // Login
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Authenticate user and issue JWT access + refresh tokens.
+   */
+  async login(data: LoginDTO): Promise<LoginResultDTO> {
+    const user = await this.authRepository.findByEmail(data.email);
+
+    // [Rule] Generic error for security — do not reveal if email exists
     if (!user) {
-      throw new Error('INVALID_CREDENTIALS');
+      throw new AppError('Email atau password salah.', 401, 'INVALID_CREDENTIALS');
     }
 
+    // [Rule] Account must be active
     if (!user.isActive) {
-      throw new Error('ACCOUNT_INACTIVE');
+      throw new AppError(
+        'Akun Anda dinonaktifkan. Silakan hubungi administrator.',
+        403,
+        'ACCOUNT_INACTIVE',
+      );
     }
 
+    // [Rule] Password must match hash
     const isPasswordValid = await comparePassword(data.password, user.passwordHash);
     if (!isPasswordValid) {
-      throw new Error('INVALID_CREDENTIALS');
+      throw new AppError('Email atau password salah.', 401, 'INVALID_CREDENTIALS');
     }
 
+    // Issue tokens
     const payload = { userId: user.id, email: user.email, role: user.role };
     const accessToken = generateAccessToken(payload);
     const refreshToken = generateRefreshToken(payload);
 
-    // Store refresh token in database (7 days expiration)
+    // Persist refresh token — 7 days TTL
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + 7);
-
-    await prisma.refreshToken.create({
-      data: {
-        userId: user.id,
-        token: refreshToken,
-        expiresAt,
-      },
-    });
+    await this.authRepository.saveRefreshToken(user.id, refreshToken, expiresAt);
 
     return {
       tokens: {
@@ -90,70 +196,74 @@ export class AuthService {
     };
   }
 
+  // ─────────────────────────────────────────────────────────────
+  // Get Profile
+  // ─────────────────────────────────────────────────────────────
+
   /**
-   * Get Current User Profile by ID
+   * Fetch the authenticated user's profile by ID.
    */
   async getProfile(userId: string) {
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        isVerified: true,
-        isActive: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    });
+    const user = await this.authRepository.findById(userId);
 
     if (!user) {
-      throw new Error('USER_NOT_FOUND');
+      throw new AppError('Data user tidak ditemukan.', 404, 'USER_NOT_FOUND');
     }
 
     return user;
   }
 
+  // ─────────────────────────────────────────────────────────────
+  // Refresh Token
+  // ─────────────────────────────────────────────────────────────
+
   /**
-   * Refresh Access Token using Refresh Token
+   * Validate a refresh token and issue a new access token.
    */
-  async refreshAccessToken(token: string) {
+  async refreshAccessToken(token: string): Promise<RefreshResultDTO> {
+    // [Rule] Token must be cryptographically valid
+    let decoded: ReturnType<typeof verifyRefreshToken>;
     try {
-      const decoded = verifyRefreshToken(token);
-
-      const storedToken = await prisma.refreshToken.findUnique({
-        where: { token },
-      });
-
-      if (!storedToken || storedToken.isRevoked || storedToken.expiresAt < new Date()) {
-        throw new Error('INVALID_REFRESH_TOKEN');
-      }
-
-      const newAccessToken = generateAccessToken({
-        userId: decoded.userId,
-        email: decoded.email,
-        role: decoded.role,
-      });
-
-      return {
-        accessToken: newAccessToken,
-        expiresIn: process.env.JWT_EXPIRES_IN || '15m',
-      };
-    } catch (err) {
-      throw new Error('INVALID_REFRESH_TOKEN');
+      decoded = verifyRefreshToken(token);
+    } catch {
+      throw new AppError(
+        'Refresh token tidak valid atau telah kadaluwarsa.',
+        401,
+        'INVALID_REFRESH_TOKEN',
+      );
     }
-  }
 
-  /**
-   * Logout user by revoking Refresh Token
-   */
-  async logout(token: string) {
-    await prisma.refreshToken.updateMany({
-      where: { token },
-      data: { isRevoked: true },
+    // [Rule] Token must exist in database and not be revoked/expired
+    const storedToken = await this.authRepository.findRefreshToken(token);
+    if (!storedToken || storedToken.isRevoked || storedToken.expiresAt < new Date()) {
+      throw new AppError(
+        'Refresh token tidak valid atau telah kadaluwarsa.',
+        401,
+        'INVALID_REFRESH_TOKEN',
+      );
+    }
+
+    const newAccessToken = generateAccessToken({
+      userId: decoded.userId,
+      email: decoded.email,
+      role: decoded.role,
     });
 
-    return true;
+    return {
+      accessToken: newAccessToken,
+      expiresIn: process.env.JWT_EXPIRES_IN || '15m',
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Logout
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Revoke the given refresh token (session logout).
+   */
+  async logout(token: string): Promise<void> {
+    await this.authRepository.revokeRefreshToken(token);
   }
 }
+
